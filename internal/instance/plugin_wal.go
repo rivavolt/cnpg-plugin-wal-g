@@ -19,6 +19,7 @@ package instance
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/cloudnative-pg/cnpg-i/pkg/wal"
 	"github.com/go-logr/logr"
@@ -131,10 +132,19 @@ func (w WALServiceImplementation) Restore(
 		return nil, fmt.Errorf("failed to get backup config: %w", err)
 	}
 
-	result, err := cmd.New("wal-g", "wal-fetch", request.SourceWalName, request.DestinationFileName).
+	// wal-g creates its destination before the download starts and leaves whatever it has written when it is interrupted, and pg_rewind --restore-target-wal hands the real pg_wal/<segment> path as the destination, not RECOVERYXLOG. A fetch killed part way (a cancelled call, a killed pod, a stalled node) would leave a truncated segment there that every later rewind reads as the real one and fails on. Fetching into a sibling name and renaming only after wal-g succeeds keeps the destination either absent or complete. The sibling sits in the same directory so the rename is atomic and wal-g's prefetch directory, derived from the destination's directory, is unchanged.
+	partial := request.DestinationFileName + ".walg-partial"
+	_ = os.Remove(partial)
+	result, err := cmd.New("wal-g", "wal-fetch", request.SourceWalName, partial).
 		WithContext(childrenCtx).
 		WithEnv(walg.NewConfigFromBackupConfig(backupConfig, pgMajorVersion).ToEnvMap()).
 		Run()
+	if err != nil {
+		_ = os.Remove(partial)
+	} else if renameErr := os.Rename(partial, request.DestinationFileName); renameErr != nil {
+		_ = os.Remove(partial)
+		err = fmt.Errorf("while moving the fetched WAL into place: %w", renameErr)
+	}
 
 	logger = logger.WithValues("stdout", string(result.Stdout()), "stderr", string(result.Stderr()))
 
