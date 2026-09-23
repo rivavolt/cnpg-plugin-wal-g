@@ -1,0 +1,37 @@
+# Runs pg_rewind --restore-target-wal against a wal-g archive with the first WAL fetch killed part way (hack/rewind-integration.sh), once with plain `wal-g wal-fetch` as the restore_command and once through the plugin's atomic fetch, at several kill points. The plain runs show what an interrupted fetch leaves in pg_wal; the atomic runs must rewind on the retry and bring the old primary back as a streaming standby. wal-g is built from the plugin image's own builder stage, so it is the binary the plugin ships.
+name: rivavolt rewind
+
+on:
+  push:
+    branches: ['atomic-restore*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rewind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build the restore helper and wal-g
+        run: |
+          mkdir -p out
+          CGO_ENABLED=0 go test -c -tags integration -o out/restore-helper ./internal/instance
+          docker build --target walg-builder -t walg-builder .
+          id=$(docker create walg-builder)
+          docker cp "$id:/wal-g" out/wal-g
+          docker rm "$id"
+          chmod -R a+rx out hack
+      - name: Rewind after an interrupted fetch, plain then atomic
+        run: |
+          set -euo pipefail
+          for mode in plain atomic; do
+            for kill in 0.01 0.02 0.04 0.08 0.16; do
+              docker run --rm -u postgres -e PATH=/opt/t:/usr/lib/postgresql/17/bin:/usr/local/bin:/usr/bin:/bin \
+                -v "$PWD/out:/opt/t:ro" -v "$PWD/hack:/opt/h:ro" postgres:17 bash /opt/h/rewind-integration.sh "$mode" "$kill"
+            done
+          done
