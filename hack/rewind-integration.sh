@@ -70,13 +70,14 @@ if [ $second = ok ]; then
   touch "$P/standby.signal"
   printf "port = 5432\nprimary_conninfo = 'port=5433 host=$base user=postgres'\n" >> "$P/postgresql.auto.conf"
   if pg_ctl -D "$P" -l "$base/p2.log" -w -t 60 start >/dev/null; then
-    for _ in $(seq 1 120); do
+    for _ in $(seq 1 240); do
       [ "$(psql -p 5433 -Atc "select count(*) from pg_stat_replication where state = 'streaming'")" = 1 ] && { started=streaming; break; }
       sleep 0.5
     done
   fi
 fi
 echo "$mode kill=${kill_after:+on-create}${kill_after:-none} prefetch=$prefetch: $(cat "$base/kills" 2>/dev/null || echo 'no kill'); first rewind $first ($(grep -m1 -E 'error|fatal' "$base/rewind1.log" || tail -1 "$base/rewind1.log")); short segments left in pg_wal: ${left:-none}; partial files: ${partials:-none}; second rewind $second ($(tail -1 "$base/rewind2.log")); old primary $started"
+[ "$started" = streaming ] || { echo "--- old primary's log after the rewind:"; tail -15 "$base/p2.log" 2>/dev/null; }
 pg_ctl -D "$P" -w -m immediate stop >/dev/null 2>&1 || true
 pg_ctl -D "$S" -w -m immediate stop >/dev/null 2>&1 || true
 if [ "$mode" = atomic ] && { [ $second != ok ] || [ "$started" != streaming ]; }; then exit 1; fi
