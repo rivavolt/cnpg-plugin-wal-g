@@ -44,6 +44,10 @@ func TestRestoreCommand(t *testing.T) {
 	}
 	err := fetchIntoPlace(dest, func(target string) error {
 		c := exec.CommandContext(ctx, "wal-g", "wal-fetch", source, target)
+		c.Env = os.Environ()
+		for k, v := range restoreEnv(dest, nil) {
+			c.Env = append(c.Env, k+"="+v)
+		}
 		c.Stdout, c.Stderr = os.Stderr, os.Stderr
 		return c.Run()
 	})

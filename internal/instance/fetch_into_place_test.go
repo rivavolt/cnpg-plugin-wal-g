@@ -101,3 +101,17 @@ func TestFetchIntoPlaceKilledFetchLeavesNothing(t *testing.T) {
 		assertAbsent(t, dest+partialSuffix)
 	}
 }
+
+func TestRestoreEnvKeepsPrefetchForRecoveryOnly(t *testing.T) {
+	for dest, want := range map[string]string{
+		"pg_wal/RECOVERYXLOG":             "",
+		"/pgdata/pg_wal/RECOVERYHISTORY":  "",
+		"pg_wal/000000010000000000000003": "1",
+		"/pgdata/pg_wal/00000002.history": "1",
+	} {
+		got := restoreEnv(dest, map[string]string{"WALG_DOWNLOAD_CONCURRENCY": ""})["WALG_DOWNLOAD_CONCURRENCY"]
+		if got != want {
+			t.Errorf("%s: WALG_DOWNLOAD_CONCURRENCY = %q, want %q", dest, got, want)
+		}
+	}
+}

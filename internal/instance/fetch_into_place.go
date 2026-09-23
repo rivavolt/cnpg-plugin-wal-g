@@ -68,3 +68,16 @@ func syncPath(path string) error {
 	defer func() { _ = f.Close() }()
 	return f.Sync()
 }
+
+// restoreEnv adjusts the wal-g environment for one restore into dest. wal-g prefetches the segments after the requested one into <directory of dest>/.wal-g/prefetch from a background process whenever its download concurrency is above 1. During recovery Postgres restores into pg_wal/RECOVERYXLOG (RECOVERYHISTORY for timeline history), and there the prefetch is what keeps archive replay fast. Any other destination is a tool asking for a named file, which today means pg_rewind --restore-target-wal. pg_rewind walks and rewrites pg_wal itself while the prefetcher creates and renames files inside it, so the rewind fails on a file that vanished under it, leaves zero-length segments behind, and every retry then fails on those. Download concurrency 1 is wal-g's own switch for not prefetching.
+func restoreEnv(dest string, env map[string]string) map[string]string {
+	switch filepath.Base(dest) {
+	case "RECOVERYXLOG", "RECOVERYHISTORY":
+		return env
+	}
+	if env == nil {
+		env = map[string]string{}
+	}
+	env["WALG_DOWNLOAD_CONCURRENCY"] = "1"
+	return env
+}

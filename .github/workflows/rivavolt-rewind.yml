@@ -34,10 +34,10 @@ jobs:
           for mode in plain atomic; do
             run "$mode" kill outside
           done
-      - name: Rewind with wal-g prefetching inside pg_wal, as the plugin leaves it, no interruption
+      - name: Rewind with wal-g's prefetch left at its default inside pg_wal, uninterrupted and interrupted
         run: |
           set -euo pipefail
-          for mode in plain atomic; do
-            docker run --rm -u postgres -e PATH=/opt/t:/usr/lib/postgresql/17/bin:/usr/local/bin:/usr/bin:/bin \
-              -v "$PWD/out:/opt/t:ro" -v "$PWD/hack:/opt/h:ro" postgres:17 bash /opt/h/rewind-integration.sh "$mode" none inside
-          done
+          run() { docker run --rm -u postgres -e PATH=/opt/t:/usr/lib/postgresql/17/bin:/usr/local/bin:/usr/bin:/bin \
+            -v "$PWD/out:/opt/t:ro" -v "$PWD/hack:/opt/h:ro" postgres:17 bash /opt/h/rewind-integration.sh "$@"; }
+          for mode in plain atomic; do run "$mode" none inside; done
+          run atomic kill inside

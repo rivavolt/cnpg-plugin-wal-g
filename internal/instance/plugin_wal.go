@@ -136,7 +136,7 @@ func (w WALServiceImplementation) Restore(
 		var fetchErr error
 		result, fetchErr = cmd.New("wal-g", "wal-fetch", request.SourceWalName, target).
 			WithContext(childrenCtx).
-			WithEnv(walg.NewConfigFromBackupConfig(backupConfig, pgMajorVersion).ToEnvMap()).
+			WithEnv(restoreEnv(request.DestinationFileName, walg.NewConfigFromBackupConfig(backupConfig, pgMajorVersion).ToEnvMap())).
 			Run()
 		return fetchErr
 	})
