@@ -67,6 +67,8 @@ partials=$(find "$P/pg_wal" -maxdepth 1 -name '*.walg-partial' -printf '%f ' | t
 second=ok; rewind 2 || second=failed
 started=no
 if [ $second = ok ]; then
+  # The rewound primary can ask to stream from the next segment boundary, which an idle new primary has not written yet; give it WAL past that point.
+  psql -p 5433 -qAtc "insert into t values ('after rewind')" -c "select pg_switch_wal()" >/dev/null
   touch "$P/standby.signal"
   printf "port = 5432\nprimary_conninfo = 'port=5433 host=$base user=postgres'\n" >> "$P/postgresql.auto.conf"
   if pg_ctl -D "$P" -l "$base/p2.log" -w -t 60 start >/dev/null; then
