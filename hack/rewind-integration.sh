@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_rewind --restore-target-wal against a wal-g file archive, with the first WAL fetch killed part way, for the unpatched `wal-g wal-fetch %f %p` and for the plugin's atomic fetch (the integration-tagged test binary). Runs as the postgres user inside the postgres image, with wal-g and restore-helper on PATH. Usage: rewind-integration.sh <plain|atomic> <kill-after in seconds, e.g. 0.04, or none> <prefetch: inside|outside>
+# pg_rewind --restore-target-wal against a wal-g file archive, with the first WAL fetch killed part way, for the unpatched `wal-g wal-fetch %f %p` and for the plugin's atomic fetch (the integration-tagged test binary). Runs as the postgres user inside the postgres image, with wal-g and restore-helper on PATH. Usage: rewind-integration.sh <plain|atomic> <kill|none> <prefetch: inside|outside>
 #
 # wal-g prefetches the next segments into <dir of the destination>/.wal-g/prefetch unless WALG_PREFETCH_DIR says otherwise, and the plugin does not set it, so in the cluster that directory sits inside pg_wal while pg_rewind walks and rewrites pg_wal. "inside" reproduces that; "outside" moves it away so a run isolates what an interrupted fetch leaves at its destination.
 set -euo pipefail
@@ -40,15 +40,21 @@ last=$(psql -p 5432 -Atc "select pg_walfile_name(pg_switch_wal())")
 until [ "$(psql -p 5432 -Atc "select coalesce(last_archived_wal, '') >= '$last' from pg_stat_archiver")" = t ]; do sleep 0.5; done
 pg_ctl -D "$P" -w -m fast stop >/dev/null
 
-# One restore_command for both runs: the first fetch pg_rewind makes is killed after $kill_after, every later one runs to completion.
+# One restore_command for both runs. The first fetch pg_rewind makes is killed the moment its output file appears, at the destination for plain wal-fetch and at the sibling for the atomic fetch, which is the window an interrupted fetch leaves behind; every later fetch runs to completion. A timed kill cannot hit that window reliably against a local archive, where a whole segment arrives in a few milliseconds.
 cat > "$base/restore.sh" <<SH
 #!/usr/bin/env bash
-if [ ! -e "$base/killed" ]; then touch "$base/killed"; kill_after=$kill_after; else kill_after=; fi
-if [ "$mode" = plain ]; then
-  if [ -n "\$kill_after" ]; then exec timeout -s KILL "\$kill_after" wal-g wal-fetch "\$1" "\$2"; else exec wal-g wal-fetch "\$1" "\$2"; fi
-else
-  RESTORE_SOURCE="\$1" RESTORE_DEST="\$2" RESTORE_KILL_AFTER="\${kill_after:+\${kill_after}s}" exec restore-helper -test.run=TestRestoreCommand >/dev/null
+if [ "$mode" = plain ]; then fetch=(wal-g wal-fetch "\$1" "\$2"); else fetch=(env RESTORE_SOURCE="\$1" RESTORE_DEST="\$2" restore-helper -test.run=TestRestoreCommand); fi
+if [ -n "$kill_after" ] && [ ! -e "$base/killed" ]; then
+  touch "$base/killed"
+  "\${fetch[@]}" >/dev/null &
+  pid=\$!
+  while kill -0 \$pid 2>/dev/null; do
+    if [ -e "\$2" ] || [ -e "\$2.walg-partial" ]; then for q in /proc/[0-9]*; do tr '\\0' ' ' < \$q/cmdline 2>/dev/null | grep -q "^wal-g wal-fetch \$1 " && kill -9 \${q#/proc/}; done; echo "killed wal-g for \$1 at \$(stat -c %s "\$2" "\$2.walg-partial" 2>/dev/null | tr '\\n' ' ')bytes" >> "$base/kills"; break; fi
+  done
+  wait \$pid
+  exit \$?
 fi
+exec "\${fetch[@]}" >/dev/null
 SH
 chmod +x "$base/restore.sh"
 rewind() {
@@ -62,7 +68,7 @@ second=ok; rewind 2 || second=failed
 started=no
 if [ $second = ok ]; then
   touch "$P/standby.signal"
-  echo "primary_conninfo = 'port=5433 host=$base user=postgres'" >> "$P/postgresql.auto.conf"
+  printf "port = 5432\nprimary_conninfo = 'port=5433 host=$base user=postgres'\n" >> "$P/postgresql.auto.conf"
   if pg_ctl -D "$P" -l "$base/p2.log" -w -t 60 start >/dev/null; then
     for _ in $(seq 1 120); do
       [ "$(psql -p 5433 -Atc "select count(*) from pg_stat_replication where state = 'streaming'")" = 1 ] && { started=streaming; break; }
@@ -70,7 +76,7 @@ if [ $second = ok ]; then
     done
   fi
 fi
-echo "$mode kill=${kill_after:-none} prefetch=$prefetch: first rewind $first ($(grep -m1 -E 'error|fatal' "$base/rewind1.log" || tail -1 "$base/rewind1.log")); short segments left in pg_wal: ${left:-none}; partial files: ${partials:-none}; second rewind $second ($(tail -1 "$base/rewind2.log")); old primary $started"
+echo "$mode kill=${kill_after:+on-create}${kill_after:-none} prefetch=$prefetch: $(cat "$base/kills" 2>/dev/null || echo 'no kill'); first rewind $first ($(grep -m1 -E 'error|fatal' "$base/rewind1.log" || tail -1 "$base/rewind1.log")); short segments left in pg_wal: ${left:-none}; partial files: ${partials:-none}; second rewind $second ($(tail -1 "$base/rewind2.log")); old primary $started"
 pg_ctl -D "$P" -w -m immediate stop >/dev/null 2>&1 || true
 pg_ctl -D "$S" -w -m immediate stop >/dev/null 2>&1 || true
 if [ "$mode" = atomic ] && [ "$prefetch" = outside ] && { [ $second != ok ] || [ "$started" != streaming ]; }; then exit 1; fi

@@ -1,4 +1,4 @@
-# Runs pg_rewind --restore-target-wal against a wal-g archive with the first WAL fetch killed part way (hack/rewind-integration.sh), once with plain `wal-g wal-fetch` as the restore_command and once through the plugin's atomic fetch, at several kill points. The plain runs show what an interrupted fetch leaves in pg_wal; the atomic runs must rewind on the retry and bring the old primary back as a streaming standby. wal-g is built from the plugin image's own builder stage, so it is the binary the plugin ships.
+# Runs pg_rewind --restore-target-wal against a wal-g archive with the first WAL fetch killed the moment its output file appears (hack/rewind-integration.sh), once with plain `wal-g wal-fetch` as the restore_command and once through the plugin's atomic fetch. The plain runs show what an interrupted fetch leaves in pg_wal; the atomic runs must rewind on the retry and bring the old primary back as a streaming standby. wal-g is built from the plugin image's own builder stage, so it is the binary the plugin ships.
 name: rivavolt rewind
 
 on:
@@ -32,7 +32,7 @@ jobs:
           run() { docker run --rm -u postgres -e PATH=/opt/t:/usr/lib/postgresql/17/bin:/usr/local/bin:/usr/bin:/bin \
             -v "$PWD/out:/opt/t:ro" -v "$PWD/hack:/opt/h:ro" postgres:17 bash /opt/h/rewind-integration.sh "$@"; }
           for mode in plain atomic; do
-            for kill in 0.01 0.02 0.04 0.08 0.16; do run "$mode" "$kill" outside; done
+            run "$mode" kill outside
           done
       - name: Rewind with wal-g prefetching inside pg_wal, as the plugin leaves it, no interruption
         run: |
