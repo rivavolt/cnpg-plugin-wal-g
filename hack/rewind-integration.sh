@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# pg_rewind --restore-target-wal against a wal-g file archive, with the first WAL fetch killed part way, for the unpatched `wal-g wal-fetch %f %p` and for the plugin's atomic fetch (the integration-tagged test binary). Runs as the postgres user inside the postgres image, with wal-g and restore-helper on PATH. Usage: rewind-integration.sh <plain|atomic> <kill-after in seconds, e.g. 0.04>
+# pg_rewind --restore-target-wal against a wal-g file archive, with the first WAL fetch killed part way, for the unpatched `wal-g wal-fetch %f %p` and for the plugin's atomic fetch (the integration-tagged test binary). Runs as the postgres user inside the postgres image, with wal-g and restore-helper on PATH. Usage: rewind-integration.sh <plain|atomic> <kill-after in seconds, e.g. 0.04, or none> <prefetch: inside|outside>
+#
+# wal-g prefetches the next segments into <dir of the destination>/.wal-g/prefetch unless WALG_PREFETCH_DIR says otherwise, and the plugin does not set it, so in the cluster that directory sits inside pg_wal while pg_rewind walks and rewrites pg_wal. "inside" reproduces that; "outside" moves it away so a run isolates what an interrupted fetch leaves at its destination.
 set -euo pipefail
-mode=$1 kill_after=$2
+mode=$1 kill_after=$2 prefetch=$3
+[ "$kill_after" = none ] && kill_after=
 base=$(mktemp -d)
 P=$base/p S=$base/s
 export WALG_FILE_PREFIX=$base/archive PGHOST=$base PGUSER=postgres
 mkdir -p "$WALG_FILE_PREFIX"
+[ "$prefetch" = outside ] && export WALG_PREFETCH_DIR=$base/prefetch
 
 initdb -D "$P" -A trust >/dev/null
 cat >> "$P/postgresql.conf" <<CONF
@@ -47,11 +51,12 @@ else
 fi
 SH
 chmod +x "$base/restore.sh"
-echo "restore_command = '$base/restore.sh %f %p'" >> "$P/postgresql.conf"
-
-rewind() { pg_rewind -D "$P" --source-server="port=5433 host=$base user=postgres" --restore-target-wal > "$base/rewind$1.log" 2>&1; }
+rewind() {
+  grep -q "^restore_command = '$base/restore.sh" "$P/postgresql.conf" || echo "restore_command = '$base/restore.sh %f %p'" >> "$P/postgresql.conf"
+  pg_rewind -D "$P" --source-server="port=5433 host=$base user=postgres" --restore-target-wal > "$base/rewind$1.log" 2>&1
+}
 first=ok; rewind 1 || first=failed
-left=$(find "$P/pg_wal" -maxdepth 1 -type f -name '0*' -size -16777216c -printf '%f=%s ' | tr -d '\n')
+left=$(find "$P/pg_wal" -maxdepth 1 -type f -regextype posix-extended -regex '.*/[0-9A-F]{24}' -size -16777216c -printf '%f=%s ' | tr -d '\n')
 partials=$(find "$P/pg_wal" -maxdepth 1 -name '*.walg-partial' -printf '%f ' | tr -d '\n')
 second=ok; rewind 2 || second=failed
 started=no
@@ -65,7 +70,7 @@ if [ $second = ok ]; then
     done
   fi
 fi
-echo "$mode kill=$kill_after: first rewind $first; short segments left in pg_wal: ${left:-none}; partial files: ${partials:-none}; second rewind $second ($(tail -1 "$base/rewind2.log")); old primary $started"
+echo "$mode kill=${kill_after:-none} prefetch=$prefetch: first rewind $first ($(grep -m1 -E 'error|fatal' "$base/rewind1.log" || tail -1 "$base/rewind1.log")); short segments left in pg_wal: ${left:-none}; partial files: ${partials:-none}; second rewind $second ($(tail -1 "$base/rewind2.log")); old primary $started"
 pg_ctl -D "$P" -w -m immediate stop >/dev/null 2>&1 || true
 pg_ctl -D "$S" -w -m immediate stop >/dev/null 2>&1 || true
-if [ "$mode" = atomic ] && { [ $second != ok ] || [ "$started" != streaming ]; }; then exit 1; fi
+if [ "$mode" = atomic ] && [ "$prefetch" = outside ] && { [ $second != ok ] || [ "$started" != streaming ]; }; then exit 1; fi

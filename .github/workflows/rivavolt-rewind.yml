@@ -26,12 +26,18 @@ jobs:
           docker cp "$id:/wal-g" out/wal-g
           docker rm "$id"
           chmod -R a+rx out hack
-      - name: Rewind after an interrupted fetch, plain then atomic
+      - name: Rewind after an interrupted fetch, plain then atomic, prefetch outside pg_wal
+        run: |
+          set -euo pipefail
+          run() { docker run --rm -u postgres -e PATH=/opt/t:/usr/lib/postgresql/17/bin:/usr/local/bin:/usr/bin:/bin \
+            -v "$PWD/out:/opt/t:ro" -v "$PWD/hack:/opt/h:ro" postgres:17 bash /opt/h/rewind-integration.sh "$@"; }
+          for mode in plain atomic; do
+            for kill in 0.01 0.02 0.04 0.08 0.16; do run "$mode" "$kill" outside; done
+          done
+      - name: Rewind with wal-g prefetching inside pg_wal, as the plugin leaves it, no interruption
         run: |
           set -euo pipefail
           for mode in plain atomic; do
-            for kill in 0.01 0.02 0.04 0.08 0.16; do
-              docker run --rm -u postgres -e PATH=/opt/t:/usr/lib/postgresql/17/bin:/usr/local/bin:/usr/bin:/bin \
-                -v "$PWD/out:/opt/t:ro" -v "$PWD/hack:/opt/h:ro" postgres:17 bash /opt/h/rewind-integration.sh "$mode" "$kill"
-            done
+            docker run --rm -u postgres -e PATH=/opt/t:/usr/lib/postgresql/17/bin:/usr/local/bin:/usr/bin:/bin \
+              -v "$PWD/out:/opt/t:ro" -v "$PWD/hack:/opt/h:ro" postgres:17 bash /opt/h/rewind-integration.sh "$mode" none inside
           done
